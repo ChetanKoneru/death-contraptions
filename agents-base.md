@@ -58,18 +58,44 @@ Never add Co-Authored-By or AI attribution to commits.
 
 # Code
 - Docstrings: brief, explain reasoning, don't retell functionality.
-
-- Lint after edits: Clojure (clj-kondo), Python (ruff), Fennel (fnlfmt), Elisp (check-paren, checkdoc, package-lint), Org (org-lint, org-table-align with column width rows for wide columns).
-
 - Prefer `<` over `>` in Lisp comparisons.
-
 - No dangling parens/brackets in Lisp-family languages.
 
+## Lint after edits
+
+- Clojure - clj-kondo
+- Python - ruff
+- Fennel - fnlfmt
+- Elisp - check-paren, checkdoc, package-lint
+- Org - org-lint, org-table-align with column width rows for wide columns
+- Yaml - yamllint
+
+## Test
+
+- Add a test for every single improvement and a new feature you add. Don't wait for me to instruct for it.
+
+- Every code change should be covered by test adjustment.
+
+- Take active action in preventing future regressions. 
 
 ## Elisp
 - After modifying `.el` files, always `load-file` them via `elisp-eval` silently.
 - In Elisp, never write `let` + `if`/`when` to bind a value and then immediately test it for non-nil. Use `if-let*` or `when-let*` instead. E.g., `(let ((x (foo))) (if x ...))` must be `(if-let* ((x (foo))) ...)`. Same for multiple bindings chained before a nil check.
 - Never hard-wrap prose in Org/Markdown. One paragraph per line, newlines only for structural elements.
+
+### Don't break active Emacs
+
+NEVER break the active Emacs session when testing.
+The user's Emacs is a live working environment - not a disposable test harness. When running elisp-eval for testing: save and restore any global/buffer-local variables you mutate, unbind any temporary advice or hooks you add, kill any temporary buffers you create, and undo any mode or state changes. Wrap test code in `unwind-protect` or equivalent to guarantee cleanup even on error. If a test requires destructive changes that cannot be safely reversed, do NOT run it in the live session - write it to a file and instruct the user to run it in a separate `emacs -Q` instead.
+
+### buttercup tests
+
+Failing buttercup tests throw enormously large stacktraces that quickly junk-up the context. Always limit them, e.g. `make test | rg FAILED`
+
+### elisp-eval hygiene
+
+- Elisp expressions often return large structures (buffer lists, package alists, plists, hash-tables). Use the `print_length` and `print_level` tool parameters to cap output - default to small values (e.g., 20/5) and increase only when you actually need more.
+- Never manually scan or edit code to fix unbalanced parentheses. Run `(check-parens)` first - it signals the exact mismatch location. Only then make a targeted one-character fix.
 
 ## Think Before You Code
 

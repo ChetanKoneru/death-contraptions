@@ -13,6 +13,25 @@
 
 (def ^:private default-timeout-sec 30)
 (def ^:private max-output-chars 50000)
+(def ^:private helpers-loaded? (atom false))
+
+(def ^:private helpers-path
+  "Absolute path to helpers.el, resolved relative to this script."
+  (str (-> (System/getProperty "babashka.file")
+           (java.io.File.)
+           (.getParentFile)
+           (.getAbsolutePath))
+       "/helpers.el"))
+
+(defn- ensure-helpers-loaded!
+  "Load helpers.el into Emacs on first eval call."
+  []
+  (when (compare-and-set! helpers-loaded? false true)
+    (let [proc (process/process
+                ["emacsclient" "--eval"
+                 (format "(load \"%s\" t t)" helpers-path)]
+                {:out :string :err :string})]
+      (.waitFor (:proc proc) 5 TimeUnit/SECONDS))))
 
 (defn- truncate
   "Emacsclient output can be enormous (e.g., full buffer dumps); cap it to
@@ -20,7 +39,7 @@
   [s]
   (if (< max-output-chars (count s))
     (str (subs s 0 max-output-chars)
-         (format "\n\n[output truncated at %d chars, %d total]"
+         (format "\n[truncated %d/%d chars]"
                  max-output-chars (count s)))
     s))
 
@@ -29,14 +48,13 @@
 
 (def elisp-eval-tool
   {:name "elisp-eval"
-   :description "Evaluate Emacs Lisp in the running Emacs server. Returns result, *Messages*, and *trace-output*. State persists between calls. Only last expression's return value is captured. No escaping needed.
-Constraints: synchronous/batch-mode. NEVER call functions that prompt for input or enter recursive-edit (read-string, y-or-n-p, edebug) - they hang. Use trace-function instead of edebug. Use run-with-timer for async work. For interactive modes, interact turn-by-turn via direct function calls and buffer reads. Strip text properties when reading special buffers to avoid output explosion."
+   :description "Evaluate Emacs Lisp in the running Emacs server. Returns result, *Messages*, and *trace-output*. State persists between calls. Only last expression's return value is captured. No escaping needed. Helpers auto-loaded: eca--check-parens-file, eca--byte-compile-check, eca--file-defuns."
    :inputSchema
    {:type "object"
     :properties {:code {:type "string"
                         :description "Emacs Lisp code to evaluate."}
                  :timeout {:type "integer"
-                           :description "Timeout in seconds (default: 30). Increase for long-running operations like profiling, sit-for, or package installs."}
+                           :description "Timeout in seconds (default: 30)."}
                  :print_length {:type "integer"
                                 :description "Max list/vector elements to print (default: 200). Set to -1 for unlimited."}
                  :print_level {:type "integer"
@@ -56,6 +74,7 @@ Constraints: synchronous/batch-mode. NEVER call functions that prompt for input 
   shell-escaping issues, wraps it to capture Messages/trace/backtrace, and
   enforces a timeout to kill runaway or interactive evals."
   [{:strs [code timeout print_length print_level]}]
+  (ensure-helpers-loaded!)
   (let [timeout-sec (or timeout default-timeout-sec)
         pl  (if print_length (if (= print_length -1) "nil" (str print_length)) "200")
         plv (if print_level  (if (= print_level -1)  "nil" (str print_level))  "10")
@@ -119,7 +138,7 @@ Constraints: synchronous/batch-mode. NEVER call functions that prompt for input 
         (if-not completed?
           (do (.destroyForcibly (:proc proc))
               {:content [{:type "text"
-                          :text (format "Evaluation timed out (%ds). Process killed. This usually means the code entered an interactive prompt, recursive-edit, or infinite loop."
+                          :text (format "Timed out (%ds). Likely interactive prompt or infinite loop. Process killed."
                                         timeout-sec)}]
                :isError true})
           (let [{:keys [exit out err]} @proc
@@ -135,10 +154,10 @@ Constraints: synchronous/batch-mode. NEVER call functions that prompt for input 
                         (when-not (str/blank? s) s))]
             (if (zero? exit)
               {:content (cond-> [{:type "text" :text (truncate result)}]
-                          messages (conj {:type "text" :text (truncate (str "--- *Messages* ---\n" messages))})
-                          trace    (conj {:type "text" :text (truncate (str "--- *trace-output* ---\n" trace))}))}
+                          messages (conj {:type "text" :text (truncate (str "[messages]\n" messages))})
+                          trace    (conj {:type "text" :text (truncate (str "[trace]\n" trace))}))}
               {:content (cond-> [{:type "text" :text (truncate (str/trim (str out err)))}]
-                          backtrace (conj {:type "text" :text (truncate (str "--- Backtrace ---\n" backtrace))}))
+                          backtrace (conj {:type "text" :text (truncate (str "[backtrace]\n" backtrace))}))
                :isError true}))))
       (finally
         (.delete tmp)

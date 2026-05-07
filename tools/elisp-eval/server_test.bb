@@ -12,8 +12,7 @@
     (let [long-str (apply str (repeat 60000 "x"))
           result   (truncate long-str)]
       (is (< (count result) (count long-str)))
-      (is (re-find #"output truncated at 50000 chars" result))
-      (is (re-find #"60000 total" result)))))
+      (is (re-find #"truncated 50000/60000 chars" result)))))
 
 (deftest tool-schemas-valid-test
   (testing "all tools have name, description, inputSchema"
@@ -44,3 +43,16 @@
     (let [result (screenshot-error "something broke")]
       (is (= "something broke" (get-in result [:content 0 :text])))
       (is (true? (:isError result))))))
+
+(deftest helpers-path-test
+  (testing "helpers.el path resolves to existing file"
+    (is (.exists (java.io.File. helpers-path)))))
+
+(deftest helpers-loading-test
+  (testing "ensure-helpers-loaded! is idempotent"
+    (reset! helpers-loaded? false)
+    (ensure-helpers-loaded!)
+    (is (true? @helpers-loaded?))
+    ;; second call is a no-op
+    (ensure-helpers-loaded!)
+    (is (true? @helpers-loaded?))))
