@@ -51,8 +51,14 @@
 (deftest helpers-loading-test
   (testing "ensure-helpers-loaded! is idempotent"
     (reset! helpers-loaded? false)
-    (ensure-helpers-loaded!)
-    (is (true? @helpers-loaded?))
-    ;; second call is a no-op
-    (ensure-helpers-loaded!)
-    (is (true? @helpers-loaded?))))
+    (let [real-proc process/process
+          call-count (atom 0)]
+      (with-redefs [process/process (fn [_cmd & opts]
+                                      (swap! call-count inc)
+                                      (apply real-proc ["true"] opts))]
+        (ensure-helpers-loaded!)
+        (is (true? @helpers-loaded?))
+        ;; second call is a no-op
+        (ensure-helpers-loaded!)
+        (is (true? @helpers-loaded?))
+        (is (= 1 @call-count) "process invoked only on first call")))))
