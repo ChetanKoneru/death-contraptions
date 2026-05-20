@@ -15,6 +15,14 @@ Strive for deep, complete analysis of all ingested context (Jira, PRs, Slack, co
 
 Before analyzing a codebase, run `git fetch` and `git status`. Clean main/master: `git pull --ff-only`. Other clean branch: report branch and ahead/behind, ask before pulling. Dirty tree: never pull, analyze as-is and state it. For reviews, also report divergence from `origin/main`. Never run mutating git commands (stash, reset, checkout, merge, rebase, pull --rebase/--force, clean) without explicit user instruction.
 
+## Investigation specs
+
+Past investigations live at `~/GitHub/{org}/llm-specs/`, indexed by `MANIFEST.md`.
+
+- When starting work on a ticket or investigating a bug, read the relevant org's `MANIFEST.md` to surface related specs. Cheap, single read.
+- When working a ticket that has a spec, treat it as a living document. Update Progress, status, refs, and Changelog as findings change. Don't wait to be asked.
+- For the full create/discover/update workflow, load the `create-spec` skill.
+
 # MCP
 
 - After modifying MCP server code/config, restart affected server(s) via elisp-eval immediately:
