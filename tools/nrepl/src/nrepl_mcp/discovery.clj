@@ -45,30 +45,26 @@
 
 (defn- probe-port
   "Connect to an nREPL port and send describe op to determine type.
+   Caches the connection for reuse by subsequent eval calls.
    Returns {:port :type :project-root :status} or nil on failure.
    Type is one of: :clj :bb :nbb :shadow-cljs :unknown."
   [{:keys [port project-root file]} timeout-ms]
   (try
-    (let [conn (client/connect! "localhost" port)
+    (let [conn (client/get-connection! "localhost" port)
           responses (client/nrepl-op! conn {"op" "describe"} :timeout-ms timeout-ms)
-          versions (some #(get % "versions") responses)]
-      (client/disconnect! conn)
-      (let [repl-type (cond
-                        ;; shadow-cljs nREPL advertises shadow-cljs in versions
-                        (get versions "shadow-cljs") :shadow-cljs
-                        ;; babashka has "babashka" in versions
-                        (get versions "babashka") :bb
-                        ;; nbb has "nbb" in versions
-                        (get versions "nbb") :nbb
-                        ;; JVM Clojure has "clojure" and "java" in versions
-                        (get versions "clojure") :clj
-                        :else :unknown)]
-        {:port port
-         :type repl-type
-         :project-root project-root
-         :file file
-         :status :connected
-         :versions versions}))
+          versions (some #(get % "versions") responses)
+          repl-type (cond
+                      (get versions "shadow-cljs") :shadow-cljs
+                      (get versions "babashka") :bb
+                      (get versions "nbb") :nbb
+                      (get versions "clojure") :clj
+                      :else :unknown)]
+      {:port port
+       :type repl-type
+       :project-root project-root
+       :file file
+       :status :connected
+       :versions versions})
     (catch Exception _
       {:port port
        :type :unknown

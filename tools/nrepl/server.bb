@@ -31,6 +31,17 @@
 (def ^:private discovery-cache (atom nil)) ;; {:ports [...] :ts epoch-ms}
 (def ^:private cache-ttl-ms 30000)
 
+(defn- warmup-ports!
+  "Pre-establish connections and sessions for discovered ports."
+  [ports]
+  (future
+    (doseq [{:keys [port status]} ports
+            :when (= :connected status)]
+      (try
+        (client/get-connection! "localhost" port)
+        (sessions/get-session! "localhost" port)
+        (catch Exception _)))))
+
 (defn- cached-discover-port
   "Return a single auto-discovered port, using a 30s cache to avoid
    filesystem walks + socket probes on every eval."
@@ -41,6 +52,7 @@
                 (:ports cached)
                 (let [fresh (discovery/discover-ports)]
                   (reset! discovery-cache {:ports fresh :ts now})
+                  (warmup-ports! fresh)
                   fresh))]
     (when (= 1 (count ports))
       (:port (first ports)))))
@@ -117,35 +129,40 @@
 
             (let [{:keys [value out err ex root-ex]} result
                   result-ns (:ns result)
-                  has-error? (some? ex)
-                  ;; Only show ns when it differs from what was requested
-                  ns-changed? (and result-ns ns (not= result-ns ns))]
-              (cond->
-                {:content
-                 (cond->
-                   [(if has-error?
-                      {:type "text"
-                       :text (truncate
-                              (str/join "\n" (remove nil? [ex (when root-ex (str "root: " root-ex))
-                                                           (when (seq err) err)])))}
-                      {:type "text"
-                       :text (truncate (if (seq value) value "nil"))})]
+                  has-error? (some? ex)]
+              ;; Track namespace for this session
+              (when result-ns
+                (sessions/update-ns! port result-ns))
+              (let [current-ns (or result-ns (sessions/current-ns port))]
+                (cond->
+                  {:content
+                   (cond->
+                     [(if has-error?
+                        {:type "text"
+                         :text (truncate
+                                (str/join "\n" (remove nil? [ex (when root-ex (str "root: " root-ex))
+                                                             (when (seq err) err)])))}
+                        {:type "text"
+                         :text (truncate (if (seq value) value "nil"))})]
 
-                   (seq out)
-                   (conj {:type "text" :text (truncate (str "[out]\n" out))})
+                     (seq out)
+                     (conj {:type "text" :text (truncate (str "[out]\n" out))})
 
-                   (and (not has-error?) (seq err))
-                   (conj {:type "text" :text (truncate (str "[err]\n" err))})
+                     (and (not has-error?) (seq err))
+                     (conj {:type "text" :text (truncate (str "[err]\n" err))})
 
-                   ns-changed?
-                   (conj {:type "text" :text (str "[ns] " result-ns)})
+                     current-ns
+                     (conj {:type "text" :text (str "[ns] " current-ns)})
 
-                   repaired?
-                   (conj {:type "text" :text (str "[delimiter-repair] " repair-note)}))}
+                     repaired?
+                     (conj {:type "text" :text (str "[delimiter-repair] " repair-note)}))}
 
-                has-error? (assoc :isError true)))))
+                  has-error? (assoc :isError true))))))
 
         (catch java.net.ConnectException e
+          ;; Server truly unreachable - invalidate discovery so we re-scan
+          (client/close-connection! host port)
+          (sessions/evict-session! port)
           (invalidate-discovery-cache!)
           {:content [{:type "text"
                       :text (format "Cannot connect to nREPL at %s:%d - %s"
@@ -153,13 +170,26 @@
            :isError true})
 
         (catch java.io.IOException _e
-          ;; Connection broke - evict connection + session, next call rebuilds both
+          ;; Transient socket error - evict connection but try to preserve session.
+          ;; The session may still be valid on the nREPL server after reconnecting.
           (client/close-connection! host port)
-          (sessions/evict-session! port)
-          (invalidate-discovery-cache!)
-          {:content [{:type "text"
-                      :text "nREPL connection lost. Will reconnect on next eval."}]
-           :isError true})
+          (try
+            (let [conn (client/get-connection! host port)
+                  sid (sessions/get-session! host port)
+                  responses (client/nrepl-op!
+                             conn {"op" "eval" "code" "true" "session" sid}
+                             :timeout-ms 3000)]
+              (if (some #(= sid (get % "session")) responses)
+                {:content [{:type "text"
+                            :text "nREPL connection restored, session preserved. Retry your eval."}]}
+                (do (sessions/evict-session! port)
+                    {:content [{:type "text"
+                                :text "nREPL reconnected but session lost. Fresh session on next eval."}]})))
+            (catch Exception _
+              (sessions/evict-session! port)
+              {:content [{:type "text"
+                          :text "nREPL connection lost. Will reconnect on next eval."}]
+               :isError true})))
 
         (catch Exception e
           {:content [{:type "text"
@@ -210,7 +240,12 @@
 
     nil))
 
+(defn- shutdown! []
+  (sessions/close-all-sessions!)
+  (client/close-all!))
+
 (when (= *file* (System/getProperty "babashka.file"))
+  (.addShutdownHook (Runtime/getRuntime) (Thread. ^Runnable shutdown!))
   (doseq [line (line-seq (java.io.BufferedReader. *in*))]
     (when-not (str/blank? line)
       (when-let [res (handle-request (json/parse-string line))]

@@ -7,6 +7,7 @@
             [nrepl-mcp.client :as client]))
 
 (def ^:private sessions (atom {})) ;; port -> session-id
+(def ^:private namespaces (atom {})) ;; port -> current-ns
 
 (def ^:private session-dir
   (str (System/getProperty "java.io.tmpdir") "/eca-nrepl-sessions"))
@@ -82,15 +83,41 @@
         (client/nrepl-op! conn {"op" "close" "session" old-sid} :timeout-ms 2000))
       (catch Exception _)))
   (swap! sessions dissoc port)
+  (swap! namespaces dissoc port)
   (delete-session-file port)
   (get-session! host port))
+
+(defn update-ns!
+  "Record the current namespace for a port's session."
+  [port ns-str]
+  (when ns-str
+    (swap! namespaces assoc port ns-str)))
+
+(defn current-ns
+  "Return the last known namespace for a port's session, or nil."
+  [port]
+  (get @namespaces port))
 
 (defn evict-session!
   "Remove a session from cache without closing it on the server.
    Used when the server is known to be unreachable."
   [port]
   (swap! sessions dissoc port)
+  (swap! namespaces dissoc port)
   (delete-session-file port))
+
+(defn close-all-sessions!
+  "Close all active sessions on their respective nREPL servers and
+   remove disk files. Best-effort - swallows exceptions per session."
+  []
+  (doseq [[port sid] @sessions]
+    (try
+      (let [conn (client/get-connection! "localhost" port)]
+        (client/nrepl-op! conn {"op" "close" "session" sid} :timeout-ms 2000))
+      (catch Exception _))
+    (delete-session-file port))
+  (reset! sessions {})
+  (reset! namespaces {}))
 
 (defn clear-all! []
   (reset! sessions {}))

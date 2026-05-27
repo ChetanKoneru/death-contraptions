@@ -10,6 +10,8 @@
 (def ^:private msg-counter (atom 0))
 
 (def ^:private connect-timeout-ms 5000)
+(def ^:private heartbeat-interval-ms 30000)
+(def ^:private heartbeat-started? (atom false))
 
 (defn- next-id [] (str (swap! msg-counter inc)))
 
@@ -49,20 +51,9 @@
       (disconnect! conn)
       (swap! connections dissoc k))))
 
-(defn get-connection!
-  "Get a cached connection or create a new one for host:port."
-  [host port]
-  (let [k [host port]]
-    (if-let [conn (get @connections k)]
-      (if (.isClosed ^Socket (:socket conn))
-        (do (swap! connections dissoc k)
-            (get-connection! host port))
-        conn)
-      (let [new-conn (connect! host port)]
-        (swap! connections assoc k new-conn)
-        new-conn))))
-
 (def close-connection! evict-connection!)
+
+;; --- message sending/receiving (before get-connection! for heartbeat) ---
 
 (defn- send-msg!
   [{:keys [out]} msg]
@@ -99,6 +90,45 @@
         msg (assoc op-map "id" id)]
     (send-msg! conn msg)
     (recv-until-done conn timeout-ms)))
+
+;; --- heartbeat (depends on nrepl-op!, must precede get-connection!) ---
+
+(defn- ping-connection!
+  "Send a describe op to verify the connection is alive.
+   Returns true if healthy, false if dead (and evicts it)."
+  [[k conn]]
+  (try
+    (nrepl-op! conn {"op" "describe"} :timeout-ms 3000)
+    true
+    (catch Exception _
+      (disconnect! conn)
+      (swap! connections dissoc k)
+      false)))
+
+(defn- start-heartbeat! []
+  (when (compare-and-set! heartbeat-started? false true)
+    (future
+      (loop []
+        (Thread/sleep heartbeat-interval-ms)
+        (doseq [entry @connections]
+          (ping-connection! entry))
+        (recur)))))
+
+;; --- connection cache ---
+
+(defn get-connection!
+  "Get a cached connection or create a new one for host:port."
+  [host port]
+  (let [k [host port]]
+    (if-let [conn (get @connections k)]
+      (if (.isClosed ^Socket (:socket conn))
+        (do (swap! connections dissoc k)
+            (get-connection! host port))
+        conn)
+      (let [new-conn (connect! host port)]
+        (swap! connections assoc k new-conn)
+        (start-heartbeat!)
+        new-conn))))
 
 (defn- aggregate-responses
   "Collapse multi-message nREPL responses into a single result map.
@@ -142,6 +172,7 @@
 
 (defn close-all!
   []
+  (reset! heartbeat-started? false)
   (doseq [[_ conn] @connections]
     (disconnect! conn))
   (reset! connections {}))

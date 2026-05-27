@@ -155,14 +155,14 @@
                                       "port" *nrepl-port*}}})]
     (is (= "42" (get-in resp [:result :content 0 :text])))))
 
-(deftest eval-no-ns-block-when-unchanged-test
-  (testing "response omits [ns] when namespace didn't change"
+(deftest eval-always-includes-ns-test
+  (testing "response always includes [ns] showing current namespace"
     (let [resp (handle-request
                 {"id" 12 "method" "tools/call"
                  "params" {"name" "nrepl-eval"
                            "arguments" {"code" "1" "port" *nrepl-port*}}})]
-      (is (not (some #(str/starts-with? (:text %) "[ns]")
-                     (get-in resp [:result :content])))))))
+      (is (some #(str/starts-with? (:text %) "[ns]")
+                (get-in resp [:result :content]))))))
 
 (deftest eval-connection-refused-test
   (let [resp (handle-request
@@ -224,6 +224,39 @@
           (is (= p1 p2)))
         (finally
           (spit port-file backup))))))
+
+;; ---------------------------------------------------------------------------
+;; Session namespace tracking
+;; ---------------------------------------------------------------------------
+
+(deftest namespace-tracking-test
+  (testing "eval tracks the current namespace"
+    (sessions/reset-session! "localhost" *nrepl-port*)
+    (handle-request
+     {"id" 50 "method" "tools/call"
+      "params" {"name" "nrepl-eval"
+                "arguments" {"code" "(ns test-ns-tracking)" "port" *nrepl-port*}}})
+    (is (= "test-ns-tracking" (sessions/current-ns *nrepl-port*)))))
+
+(deftest namespace-displayed-in-response-test
+  (testing "eval response contains [ns] block"
+    (let [resp (handle-request
+                {"id" 51 "method" "tools/call"
+                 "params" {"name" "nrepl-eval"
+                           "arguments" {"code" "(+ 1 1)" "port" *nrepl-port*}}})]
+      (is (some #(str/starts-with? (:text %) "[ns]")
+                (get-in resp [:result :content]))))))
+
+;; ---------------------------------------------------------------------------
+;; Close-all-sessions
+;; ---------------------------------------------------------------------------
+
+(deftest close-all-sessions-test
+  (testing "close-all-sessions! clears sessions and ns tracking"
+    (sessions/get-session! "localhost" *nrepl-port*)
+    (sessions/update-ns! *nrepl-port* "user")
+    (sessions/close-all-sessions!)
+    (is (nil? (sessions/current-ns *nrepl-port*)))))
 
 ;; ---------------------------------------------------------------------------
 ;; Delimiter repair
