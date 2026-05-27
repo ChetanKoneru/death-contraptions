@@ -40,4 +40,21 @@
         (push (cons (match-string 1) (match-string 2)) defs))
       (nreverse defs))))
 
+
+(defun eca--frame-cg-window-id ()
+  "Get the CGWindowID for the selected Emacs frame on macOS.
+Uses CoreGraphics via Swift to find the main Emacs window."
+  (string-trim
+   (shell-command-to-string
+    (concat
+     "swift -e '"
+     "import Cocoa; "
+     "let o: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]; "
+     "if let wl = CGWindowListCopyWindowInfo(o, kCGNullWindowID) as? [[String: Any]] { "
+     "for w in wl { "
+     "if let n = w[\"kCGWindowOwnerName\"] as? String, n == \"Emacs\", "
+     "let l = w[\"kCGWindowLayer\"] as? Int, l == 0, "
+     "let id = w[\"kCGWindowNumber\"] as? Int { "
+     "print(id); break } } }'"))))
+
 (provide 'eca-helpers)

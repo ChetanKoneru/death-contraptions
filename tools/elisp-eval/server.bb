@@ -45,11 +45,11 @@
     s))
 
 (def server-info
-  {:name "elisp-eval" :version "1.1.0"})
+  {:name "elisp-eval" :version "1.2.0"})
 
 (def elisp-eval-tool
   {:name "elisp-eval"
-   :description "Evaluate Emacs Lisp in the running Emacs server. Returns result, *Messages*, and *trace-output*. State persists between calls. Only last expression's return value is captured. No escaping needed. Helpers auto-loaded: eca--check-parens-file, eca--byte-compile-check, eca--file-defuns."
+   :description "Evaluate Emacs Lisp in the running Emacs server. Returns result, *Messages*, and *trace-output*. State persists between calls. Only last expression's return value is captured. No escaping needed. Helpers auto-loaded: eca--check-parens-file, eca--byte-compile-check, eca--file-defuns.\n\nResponse fields (separate content blocks):\n- Position 0: eval result (success) or [error] with condition type and message\n- [backtrace]: stack trace on error (Emacs 29+ only)\n- [messages]: new *Messages* buffer output during eval\n- [warnings]: new *Warnings* buffer output during eval\n- [trace]: new *trace-output* buffer output during eval"
    :inputSchema
    {:type "object"
     :properties {:code {:type "string"
@@ -83,21 +83,30 @@
         msgs-tmp   (File/createTempFile "eca-msgs-"   ".txt")
         bt-tmp     (File/createTempFile "eca-bt-"     ".txt")
         trace-tmp  (File/createTempFile "eca-trace-"  ".txt")
-        result-tmp (File/createTempFile "eca-result-" ".txt")
-        path        (.getAbsolutePath tmp)
-        msgs-path   (.getAbsolutePath msgs-tmp)
-        bt-path     (.getAbsolutePath bt-tmp)
-        trace-path  (.getAbsolutePath trace-tmp)
-        result-path (.getAbsolutePath result-tmp)]
+        result-tmp   (File/createTempFile "eca-result-"   ".txt")
+        error-tmp    (File/createTempFile "eca-error-"    ".txt")
+        warnings-tmp (File/createTempFile "eca-warnings-" ".txt")
+        path          (.getAbsolutePath tmp)
+        msgs-path     (.getAbsolutePath msgs-tmp)
+        bt-path       (.getAbsolutePath bt-tmp)
+        trace-path    (.getAbsolutePath trace-tmp)
+        result-path   (.getAbsolutePath result-tmp)
+        error-path    (.getAbsolutePath error-tmp)
+        warnings-path (.getAbsolutePath warnings-tmp)]
     (try
       (spit tmp code)
       (let [wrapper (format "(let* ((eca--bt-path \"%s\")
        (eca--result-path \"%s\")
        (eca--trace-path \"%s\")
+       (eca--error-path \"%s\")
+       (eca--warnings-path \"%s\")
        (msgs-buf (get-buffer-create \"*Messages*\"))
        (msgs-pos (with-current-buffer msgs-buf (point-max)))
        (trace-buf (get-buffer \"*trace-output*\"))
        (trace-pos (when trace-buf (with-current-buffer trace-buf (point-max))))
+       (warn-buf (get-buffer \"*Warnings*\"))
+       (warn-pos (when warn-buf (with-current-buffer warn-buf (point-max))))
+       (eca--error-info nil)
        (result (with-temp-buffer
                  (insert-file-contents \"%s\")
                  (goto-char (point-min))
@@ -106,15 +115,20 @@
                        (while t (push (read (current-buffer)) forms))
                      (end-of-file nil))
                    (let ((eca--code (cons 'progn (nreverse forms))))
-                     (if (fboundp 'handler-bind)
-                         (handler-bind
-                             ((error
-                               (lambda (_e)
-                                 (write-region
-                                  (with-output-to-string (backtrace))
-                                  nil eca--bt-path nil 'silent))))
+                     (condition-case err
+                         (if (fboundp 'handler-bind)
+                             (handler-bind
+                                 ((error
+                                   (lambda (_e)
+                                     (write-region
+                                      (with-output-to-string (backtrace))
+                                      nil eca--bt-path nil 'silent))))
+                               (eval eca--code t))
                            (eval eca--code t))
-                       (eval eca--code t))))))
+                       (error
+                        (setq eca--error-info
+                              (format \"%%S: %%s\" (car err) (error-message-string err)))
+                        nil))))))
        (new-msgs (with-current-buffer msgs-buf
                    (let ((s (string-trim (buffer-substring-no-properties msgs-pos (point-max)))))
                      (and (not (string-empty-p s)) s))))
@@ -124,15 +138,28 @@
                         (let ((s (string-trim
                                   (buffer-substring-no-properties
                                    (or trace-pos (point-min)) (point-max)))))
-                          (and (not (string-empty-p s)) s)))))))
+                          (and (not (string-empty-p s)) s))))))
+       (new-warnings (let ((wb (or warn-buf (get-buffer \"*Warnings*\"))))
+                       (when wb
+                         (with-current-buffer wb
+                           (let ((s (string-trim
+                                     (buffer-substring-no-properties
+                                      (or warn-pos (point-min)) (point-max)))))
+                             (and (not (string-empty-p s)) s)))))))
   (when new-msgs
     (write-region new-msgs nil \"%s\" nil 'silent))
   (when new-trace
     (write-region new-trace nil eca--trace-path nil 'silent))
-  (let ((print-length %s)
-        (print-level %s))
-    (write-region (prin1-to-string result) nil eca--result-path nil 'silent))
-  result)" bt-path result-path trace-path path msgs-path pl plv)
+  (when new-warnings
+    (write-region new-warnings nil eca--warnings-path nil 'silent))
+  (if eca--error-info
+      (progn
+        (write-region eca--error-info nil eca--error-path nil 'silent)
+        nil)
+    (let ((print-length %s)
+          (print-level %s))
+      (write-region (prin1-to-string result) nil eca--result-path nil 'silent)
+      result)))" bt-path result-path trace-path error-path warnings-path path msgs-path pl plv)
             proc (process/process ["emacsclient" "--eval" wrapper]
                                   {:out :string :err :string})
             completed? (.waitFor (:proc proc) timeout-sec TimeUnit/SECONDS)]
@@ -143,38 +170,58 @@
                                         timeout-sec)}]
                :isError true})
           (let [{:keys [exit out err]} @proc
-                ;; Prefer result from file (has print limits) over stdout
                 result-text (let [s (str/trim (slurp result-tmp))]
                               (when-not (str/blank? s) s))
-                result (or result-text (str/trim out))
-                messages (let [s (str/trim (slurp msgs-tmp))]
-                           (when-not (str/blank? s) s))
+                result    (or result-text (str/trim out))
+                messages  (let [s (str/trim (slurp msgs-tmp))]
+                            (when-not (str/blank? s) s))
                 backtrace (let [s (str/trim (slurp bt-tmp))]
                             (when-not (str/blank? s) s))
-                trace (let [s (str/trim (slurp trace-tmp))]
-                        (when-not (str/blank? s) s))]
-            (if (zero? exit)
+                trace     (let [s (str/trim (slurp trace-tmp))]
+                            (when-not (str/blank? s) s))
+                err-text  (let [s (str/trim (slurp error-tmp))]
+                            (when-not (str/blank? s) s))
+                warnings  (let [s (str/trim (slurp warnings-tmp))]
+                            (when-not (str/blank? s) s))]
+            (cond
+              ;; Structured error: eval signaled a condition
+              err-text
+              {:content (cond-> [{:type "text" :text (truncate (str "[error]\n" err-text))}]
+                          backtrace (conj {:type "text" :text (truncate (str "[backtrace]\n" backtrace))})
+                          messages  (conj {:type "text" :text (truncate (str "[messages]\n" messages))})
+                          warnings  (conj {:type "text" :text (truncate (str "[warnings]\n" warnings))})
+                          trace     (conj {:type "text" :text (truncate (str "[trace]\n" trace))}))
+               :isError true}
+
+              ;; Success
+              (zero? exit)
               {:content (cond-> [{:type "text" :text (truncate result)}]
                           messages (conj {:type "text" :text (truncate (str "[messages]\n" messages))})
+                          warnings (conj {:type "text" :text (truncate (str "[warnings]\n" warnings))})
                           trace    (conj {:type "text" :text (truncate (str "[trace]\n" trace))}))}
-              {:content (cond-> [{:type "text" :text (truncate (str/trim (str out err)))}]
-                          backtrace (conj {:type "text" :text (truncate (str "[backtrace]\n" backtrace))}))
+
+              ;; Fallback: wrapper-level failure
+              :else
+              {:content [{:type "text" :text (truncate (str/trim (str out err)))}]
                :isError true}))))
       (finally
         (.delete tmp)
         (.delete msgs-tmp)
         (.delete bt-tmp)
         (.delete trace-tmp)
-        (.delete result-tmp)))))
+        (.delete result-tmp)
+        (.delete error-tmp)
+        (.delete warnings-tmp)))))
 
 (defn- emacsclient-eval
   "Quick one-shot emacsclient eval. Returns trimmed stdout or nil."
-  [expr]
-  (let [proc (process/process ["emacsclient" "--eval" expr]
-                              {:out :string :err :string})
-        completed? (.waitFor (:proc proc) 5 TimeUnit/SECONDS)]
-    (when (and completed? (zero? (:exit @proc)))
-      (str/trim (:out @proc)))))
+  ([expr] (emacsclient-eval expr 5))
+  ([expr timeout-sec]
+   (let [proc (process/process ["emacsclient" "--eval" expr]
+                               {:out :string :err :string})
+         completed? (.waitFor (:proc proc) timeout-sec TimeUnit/SECONDS)]
+     (when (and completed? (zero? (:exit @proc)))
+       (str/trim (:out @proc))))))
 
 (defn- file->b64-image
   "Read a PNG file, return MCP image content."
@@ -189,74 +236,85 @@
   [msg]
   {:content [{:type "text" :text msg}] :isError true})
 
+(defn- screenshot-via-emacs
+  "Run a screenshot command as an Emacs child process so it inherits Emacs.app's
+  macOS screen-recording / accessibility TCC grants. Returns the exit code
+  string from emacsclient, or nil on failure."
+  [elisp]
+  (emacsclient-eval elisp 15))
+
 (defn- screenshot-macos
-  "Get CGWindowID via Swift + CoreGraphics, then screencapture."
-  []
-  (let [swift-code (str "import Cocoa\n"
-                        "let opts: CGWindowListOption = [.optionOnScreenOnly, .excludeDesktopElements]\n"
-                        "if let wl = CGWindowListCopyWindowInfo(opts, kCGNullWindowID) as? [[String: Any]] {\n"
-                        "  for w in wl {\n"
-                        "    if let o = w[\"kCGWindowOwnerName\"] as? String, o == \"Emacs\",\n"
-                        "       let l = w[\"kCGWindowLayer\"] as? Int, l == 0,\n"
-                        "       let n = w[\"kCGWindowNumber\"] as? Int {\n"
-                        "      print(n); break\n"
-                        "    }\n"
-                        "  }\n"
-                        "}\n")
-        wid-proc (process/process ["swift" "-e" swift-code]
-                                  {:out :string :err :string})
-        _        (.waitFor (:proc wid-proc) 15 TimeUnit/SECONDS)
-        wid      (some-> @wid-proc :out str/trim)]
-    (if (or (not (zero? (:exit @wid-proc))) (str/blank? wid))
-      (screenshot-error "Could not find Emacs CGWindowID. Is Emacs a GUI window?")
-      (let [tmp (File/createTempFile "emacs-screenshot-" ".png")
-            tmp-path (.getAbsolutePath tmp)]
-        (try
-          (let [proc (process/process
-                      ["screencapture" (str "-l" wid) "-x" "-o" tmp-path]
-                      {:out :string :err :string})
-                completed? (.waitFor (:proc proc) 10 TimeUnit/SECONDS)]
-            (if (or (not completed?) (not (zero? (:exit @proc))))
-              (screenshot-error "screencapture failed.")
-              (file->b64-image tmp)))
-          (finally (.delete tmp)))))))
-
-(defn- screenshot-x11
-  "Use Emacs outer-window-id + ImageMagick import."
-  []
-  (let [raw (emacsclient-eval "(frame-parameter nil 'outer-window-id)")
-        wid (some-> raw (str/replace "\"" ""))]
-    (if (or (str/blank? wid) (= wid "nil"))
-      (screenshot-error "Could not get X11 window ID from Emacs.")
-      (let [tmp (File/createTempFile "emacs-screenshot-" ".png")
-            tmp-path (.getAbsolutePath tmp)]
-        (try
-          (let [proc (process/process ["import" "-window" wid tmp-path]
-                                      {:out :string :err :string})
-                completed? (.waitFor (:proc proc) 10 TimeUnit/SECONDS)]
-            (if (or (not completed?) (not (zero? (:exit @proc))))
-              (screenshot-error "import failed. Is ImageMagick installed?")
-              (file->b64-image tmp)))
-          (finally (.delete tmp)))))))
-
-(defn- screenshot-pgtk
-  "Wayland - try gnome-screenshot, fall back to grim."
+  "Capture Emacs frame via screencapture, routed through Emacs to inherit
+  macOS screen recording permission from Emacs.app. Uses eca--frame-cg-window-id
+  helper to find the CGWindowID via CoreGraphics."
   []
   (let [tmp      (File/createTempFile "emacs-screenshot-" ".png")
         tmp-path (.getAbsolutePath tmp)]
     (try
-      (let [proc (process/process ["gnome-screenshot" "-w" "-f" tmp-path]
-                                  {:out :string :err :string})
-            completed? (.waitFor (:proc proc) 10 TimeUnit/SECONDS)]
-        (if (and completed? (zero? (:exit @proc)))
+      (let [result (screenshot-via-emacs
+                    (format "(let ((wid (eca--frame-cg-window-id)))
+                               (if (string-empty-p wid)
+                                   -1
+                                 (call-process \"screencapture\" nil nil nil
+                                               (concat \"-l\" wid) \"-x\" \"-o\" \"%s\")))"
+                            tmp-path))]
+        (cond
+          (nil? result)
+          (screenshot-error "emacsclient failed. Is Emacs server running?")
+
+          (= result "0")
           (file->b64-image tmp)
-          ;; fallback to grim
-          (let [grim (process/process ["grim" tmp-path]
-                                      {:out :string :err :string})
-                grim-ok? (.waitFor (:proc grim) 10 TimeUnit/SECONDS)]
-            (if (and grim-ok? (zero? (:exit @grim)))
-              (file->b64-image tmp)
-              (screenshot-error "gnome-screenshot and grim both failed.")))))
+
+          :else
+          (screenshot-error "screencapture failed. Is Emacs a GUI window?")))
+      (finally (.delete tmp)))))
+
+(defn- screenshot-x11
+  "Capture Emacs frame via ImageMagick import, routed through Emacs."
+  []
+  (let [tmp      (File/createTempFile "emacs-screenshot-" ".png")
+        tmp-path (.getAbsolutePath tmp)]
+    (try
+      (let [result (screenshot-via-emacs
+                    (format "(let ((wid (frame-parameter nil 'outer-window-id)))
+                               (if (and wid (not (string-empty-p wid)))
+                                   (call-process \"import\" nil nil nil
+                                                 \"-window\" wid \"%s\")
+                                 -1))"
+                            tmp-path))]
+        (cond
+          (nil? result)
+          (screenshot-error "emacsclient failed.")
+
+          (= result "0")
+          (file->b64-image tmp)
+
+          :else
+          (screenshot-error "import failed. Is ImageMagick installed?")))
+      (finally (.delete tmp)))))
+
+(defn- screenshot-pgtk
+  "Wayland screenshot via gnome-screenshot or grim, routed through Emacs."
+  []
+  (let [tmp      (File/createTempFile "emacs-screenshot-" ".png")
+        tmp-path (.getAbsolutePath tmp)]
+    (try
+      (let [result (screenshot-via-emacs
+                    (format "(cond
+                               ((zerop (call-process \"gnome-screenshot\" nil nil nil
+                                                      \"-w\" \"-f\" \"%s\")) 0)
+                               ((zerop (call-process \"grim\" nil nil nil \"%s\")) 0)
+                               (t 1))"
+                            tmp-path tmp-path))]
+        (cond
+          (nil? result)
+          (screenshot-error "emacsclient failed.")
+
+          (= result "0")
+          (file->b64-image tmp)
+
+          :else
+          (screenshot-error "gnome-screenshot and grim both failed.")))
       (finally (.delete tmp)))))
 
 (defn take-screenshot
@@ -270,6 +328,7 @@
       "pgtk" (screenshot-pgtk)
       (screenshot-error
        (str "Unsupported window system: " ws ". Requires GUI Emacs.")))))
+
 (defn handle-request
   "MCP JSON-RPC dispatch - routes initialize, tools/list, and tools/call to
   their handlers; returns nil for notifications and unknown methods."
