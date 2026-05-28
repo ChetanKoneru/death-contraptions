@@ -61,6 +61,13 @@ Use the narrowest tool for the question:
 - Prefer `rg` and `fd` over `grep` and `find`.
 - Jira: use `jira view PROJ-12345 --template json` (fetches comments, subtasks, links). For writes, use `jira req -M POST /rest/api/2/issue/KEY/comment` with JSON body (interactive commands hang).
 
+## Async waiting
+
+- NEVER use `sleep` in a loop or a long `sleep` followed by re-checking a condition. This wastes tokens and blocks the conversation.
+- When you need to wait for an async condition (CI checks, deployment rollout, pod readiness, build completion), use the `monitor` skill with `eca__bg_job` background jobs.
+- If the monitor skill's script is missing or broken, use `gh ... --watch`, `kubectl -w`, or similar streaming CLI as a `background` shell command, then peek with `eca__bg_job read_output` at natural turn boundaries - not in a tight loop.
+- Do useful work while waiting (prep next steps, rebase other branches, review code).
+
 # Code
 - Docstrings: brief, explain reasoning, don't retell functionality.
 - No explicit mentioning of ticket numbers, issues or PRs in the code - that info can be discovered via git blame.

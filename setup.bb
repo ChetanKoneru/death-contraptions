@@ -393,14 +393,18 @@ end tell"
         (spit mcp-path (json/generate-string updated {:pretty true}))
         (println (str "  wrote: " mcp-path " (mcpServers)"))))
 
-    ;; Write generated AGENTS.md into ~/.config/eca/ as a real file.
+    ;; Write generated AGENTS.md into ~/.config/eca/ as a read-only file.
     ;; The canonical source is agents-base.md + :agents-extra; every
     ;; consumer gets a copy so a single setup.bb run keeps them in sync.
+    ;; Read-only prevents agents from accidentally editing the derived copy.
     (let [dst (str eca-dir "/AGENTS.md")
+          f (io/file dst)
           p (java.nio.file.Paths/get dst (into-array String []))]
+      (when (.exists f) (.setWritable f true))
       (java.nio.file.Files/deleteIfExists p)
       (spit dst agents-content)
-      (println (str "  wrote: " dst)))
+      (.setReadOnly f)
+      (println (str "  wrote: " dst " (read-only)")))
 
     ;; Symlinks
     (create-symlink (str eca-dir "/tools") tools-dir)
