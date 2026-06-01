@@ -70,7 +70,7 @@ Use the narrowest tool for the question:
 
 # Code
 - Docstrings: brief, explain reasoning, don't retell functionality.
-- No explicit mentioning of ticket numbers, issues or PRs in the code - that info can be discovered via git blame.
+- Do not mention ticket, PR, issue numbers in the code - that info can be discovered via git blame.
 
 ## Lisp
 - Prefer `<` over `>` in Lisp - Clojure, Elisp, Fennel, etc.
